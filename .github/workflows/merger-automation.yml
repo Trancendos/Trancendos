@@ -1,0 +1,87 @@
+name: 🔀 Activity 2 - Intelligent Merger & Archival
+
+on:
+  workflow_dispatch:
+    inputs:
+      merge_plan:
+        description: 'Path to merge plan YAML'
+        required: true
+        default: 'config/merge-plan.yaml'
+      dry_run:
+        description: 'Perform dry run (no actual changes)'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  merge-repositories:
+    name: Execute Repository Merge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Validate merge plan
+        run: |
+          python scripts/merger/validate-plan.py \
+            --plan ${{ github.event.inputs.merge_plan }}
+
+      - name: Execute merge (dry run)
+        if: github.event.inputs.dry_run == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/merger/merge-repositories.py \
+            --config ${{ github.event.inputs.merge_plan }} \
+            --dry-run \
+            --output merger-preview.json
+
+      - name: Execute merge (production)
+        if: github.event.inputs.dry_run == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/merger/merge-repositories.py \
+            --config ${{ github.event.inputs.merge_plan }} \
+            --output merger-result.json
+
+      - name: Extract knowledge from archived repos
+        if: github.event.inputs.dry_run == 'false'
+        run: |
+          python scripts/merger/extract-knowledge.py \
+            --config ${{ github.event.inputs.merge_plan }} \
+            --output docs/archived/
+
+      - name: Upload merge report
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-report
+          path: merger-*.json
+
+      - name: Create merge summary issue
+        if: github.event.inputs.dry_run == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('merger-result.json', 'utf8'));
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `✅ Repository Merge Completed - ${new Date().toISOString().split('T')[0]}`,
+              body: `### Merge Summary\n\n- **Repositories Merged**: ${report.merged_count}\n- **Commits Preserved**: ${report.total_commits}\n- **Branches Preserved**: ${report.total_branches}\n- **Tags Preserved**: ${report.total_tags}\n\nSee [full report](${context.payload.repository.html_url}/actions/runs/${context.runId})`,
+              labels: ['automation', 'merger']
+            })

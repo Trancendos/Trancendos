@@ -1,0 +1,91 @@
+name: 🔍 Activity 1 - Discovery & Inventory Scan
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of scan to perform'
+        required: true
+        type: choice
+        options:
+          - all
+          - repositories
+          - platforms
+          - compliance
+
+jobs:
+  discovery-scan:
+    name: Run Discovery Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Scan repositories
+        if: github.event.inputs.scan_type == 'all' || github.event.inputs.scan_type == 'repositories'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/discovery/scan-repositories.py \
+            --output inventory/repositories.json \
+            --format json
+
+      - name: Scan platforms
+        if: github.event.inputs.scan_type == 'all' || github.event.inputs.scan_type == 'platforms'
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: |
+          python scripts/discovery/scan-platforms.py \
+            --output inventory/platforms.json
+
+      - name: Run compliance audit
+        if: github.event.inputs.scan_type == 'all' || github.event.inputs.scan_type == 'compliance'
+        run: |
+          python scripts/discovery/compliance-audit.py \
+            --output inventory/compliance-report.json
+
+      - name: Generate summary report
+        run: |
+          python scripts/discovery/generate-summary.py \
+            --input inventory/ \
+            --output inventory/summary.md
+
+      - name: Commit inventory updates
+        run: |
+          git config --global user.name "Trancendos Bot"
+          git config --global user.email "bot@trancendos.com"
+          git add inventory/
+          git diff --quiet && git diff --staged --quiet || \
+            git commit -m "📊 Update inventory scan - $(date +'%Y-%m-%d')"
+          git push
+
+      - name: Create issue if anomalies detected
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Discovery Scan Anomaly Detected',
+              body: `Discovery scan failed or detected anomalies.\n\nCheck the [workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId}) for details.`,
+              labels: ['automation', 'needs-investigation']
+            })

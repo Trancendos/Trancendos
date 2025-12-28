@@ -1,0 +1,86 @@
+name: 🧠 Activity 3 - ML Training & Deployment
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly on Monday at 2 AM
+  workflow_dispatch:
+    inputs:
+      model_type:
+        description: 'Model to train'
+        required: true
+        type: choice
+        options:
+          - all
+          - pr_merge_prediction
+          - deployment_risk
+          - code_review_suggester
+          - issue_classifier
+
+jobs:
+  train-ml-models:
+    name: Train ML Models
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install ML dependencies
+        run: |
+          pip install -r ml/requirements.txt
+
+      - name: Download training data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python ml/data/collect-training-data.py \
+            --output ml/data/training/
+
+      - name: Train models
+        run: |
+          python ml/training/train-all-models.py \
+            --data ml/data/training/ \
+            --output ml/models/ \
+            --model-type ${{ github.event.inputs.model_type || 'all' }}
+
+      - name: Evaluate models
+        run: |
+          python ml/training/evaluate-models.py \
+            --models ml/models/ \
+            --output ml/evaluation/
+
+      - name: Deploy models (if performance improved)
+        run: |
+          python ml/deployment/deploy-models.py \
+            --models ml/models/ \
+            --evaluation ml/evaluation/ \
+            --threshold 0.05  # Deploy if 5% improvement
+
+      - name: Commit model artifacts
+        run: |
+          git config --global user.name "Trancendos ML Bot"
+          git config --global user.email "ml-bot@trancendos.com"
+          git add ml/models/ ml/evaluation/
+          git diff --quiet && git diff --staged --quiet || \
+            git commit -m "🤖 Update ML models - $(date +'%Y-%m-%d')"
+          git push
+
+      - name: Create performance report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const evaluation = JSON.parse(fs.readFileSync('ml/evaluation/summary.json', 'utf8'));
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `📊 ML Model Performance Report - ${new Date().toISOString().split('T')[0]}`,
+              body: `### Model Performance\n\n${Object.entries(evaluation.models).map(([name, metrics]) => `**${name}**:\n- Accuracy: ${(metrics.accuracy * 100).toFixed(2)}%\n- Precision: ${(metrics.precision * 100).toFixed(2)}%\n- Recall: ${(metrics.recall * 100).toFixed(2)}%`).join('\n\n')}`,
+              labels: ['ml', 'metrics']
+            })
